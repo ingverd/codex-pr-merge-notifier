@@ -1,0 +1,10 @@
+{
+  "name": "codex-pr-merge-notifier",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Experimental signed GitHub merge notifications for local Codex desktop chats",
+  "type": "module",
+  "license": "MIT",
+  "engines": { "node": ">=24" },
+  "scripts": { "test": "node --test" }
+}

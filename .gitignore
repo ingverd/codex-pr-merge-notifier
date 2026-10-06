@@ -1,0 +1,13 @@
+private/
+notifier.json
+ngrok-service.yml
+ngrok.exe
+*.log
+*-result.json
+node_modules/
+.env
+.env.*
+*.pem
+*.key
+*.sqlite
+*.sqlite-*
