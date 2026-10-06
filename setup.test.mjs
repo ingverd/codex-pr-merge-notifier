@@ -1,13 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, copyFileSync, writeFileSync, readFileSync, statSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, copyFileSync, writeFileSync, readFileSync, statSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 
 test('Windows setup creates isolated private settings and preserves existing hooks and credentials', () => {
-  const root = mkdtempSync(join(tmpdir(), 'merge setup with spaces-'));
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'merge setup with spaces-')));
   const source = dirname(fileURLToPath(import.meta.url));
   const home = join(root, 'codex-home');
   function run(script, args=[]) {
