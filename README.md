@@ -4,6 +4,26 @@ Send a signed GitHub PR merge event to the local Codex chat that owns its native
 
 `GitHub webhook → HTTPS tunnel → localhost receiver → matching Codex chat`
 
+## Set up with a Codex agent
+
+Share this repository link in a **local Codex desktop chat for your project** to request installation:
+
+[https://github.com/ingverd/codex-pr-merge-notifier](https://github.com/ingverd/codex-pr-merge-notifier)
+
+The instructions below let the agent work out the setup from your project; you do not need to copy a separate installation prompt. You will still need an ngrok account, permission to administer your project's GitHub webhooks, and any Windows/Codex permission confirmations. The agent should ask only for information or steps it cannot safely obtain or perform itself.
+
+### Instructions for the agent
+
+When the user shares this repository to set up merge notifications, carry the installation through verification using the Windows installation steps below. If the link was shared for a review or explanation, follow that request instead.
+
+1. **Identify the target before cloning.** Inspect the current project's GitHub remote and existing notifier settings. Use the current project's `owner/repo` when there is one clear intended GitHub.com repository; ask only if the target is missing or ambiguous. This notifier's own clone remote is not the target. Keep credential-bearing remote URLs out of output. Obtain the user's assigned ngrok domain from their dashboard or ask for the domain, never their token.
+2. **Check compatibility and existing state.** Confirm Windows, a local Codex desktop chat, Node.js 24+, and the current desktop connection required by `desktop-client.mjs`. Do not invent or persist app IPC paths. Inspect existing service, receiver, hook, skill and local settings before making changes. Reuse a matching installation; the setup scripts intentionally refuse overwrites and service takeover. For a conflicting installation, explain the conflict and ask which one the user wants to keep before replacing anything.
+3. **Use the supplied setup.** Clone into a stable folder outside the user's application checkout, inspect the scripts and run the source tests. Use the official signed ngrok binary and follow **Install on Windows** in order. No npm dependencies are needed. For a fresh installation, check that the configured receiver port and ngrok's local API port 4040 are available. Automate the documented steps with available tools; do not introduce another supervisor, scheduled task, routing registry or global shell-policy change.
+4. **Keep secrets local.** Run `connect-ngrok.ps1` in an interactive local PowerShell so the user can enter the authtoken in its masked prompt. Have the user enter `private/webhook.secret` directly into GitHub as described below. Never read or display either credential in agent output, chat, screenshots or logs. Use the normal UAC and Codex hook-review flows when required; do not bypass them. Give the user one concrete local action when a step requires their input, then continue after it is completed.
+5. **Verify the running installation.** Read back the ngrok service's running state, automatic startup, Local Service account and native recovery settings. Confirm the assigned HTTPS endpoint forwards to the configured receiver on `127.0.0.1`, the installed startup hook is enabled, targets this installation and has passed required Codex review, and `merge-notifier.mjs check` reports `connected: true`. Check GitHub's live webhook configuration: exact target repository, `/github/merge`, JSON, SSL verification enabled, and only `pull_request` events. Confirm a genuine GitHub ping delivery receives HTTP 202. Inspect uncertain mutations before retrying.
+6. **Verify routing when a real PR is available.** Use the native Codex PR attachment in the intended chat, then run `merge-notifier.mjs resolve <PR URL>`. Exactly that one eligible chat must be returned. Do not attach every PR to the installation chat or create/merge a PR just for testing. If no suitable PR exists, report routing as unverified. Ping proves webhook ingress and signature validation; only a real owner-approved merge can prove delivery into the destination chat.
+7. **Report the result.** Give the installation path, configured `owner/repo`, webhook URL, checks that passed, any unverified stage or concrete blocker, and the `$merge-notifier status` / `$merge-notifier reconnect` commands. Do not report a complete end-to-end test unless a real merge notification was observed. Keep the existing chat's model and reasoning settings.
+
 ## Scope and compatibility
 
 - One explicitly configured GitHub.com repository per installation. Reuse the same source with your own repository, domain and credentials.
