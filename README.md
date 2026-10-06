@@ -1,5 +1,7 @@
 # Codex PR merge notifier
 
+[English](README.md) | [Русский](README.ru.md)
+
 Send a signed GitHub PR merge event to the local Codex chat that owns its native PR attachment. Experimental community tooling, unaffiliated with OpenAI or ngrok.
 
 `GitHub webhook → HTTPS tunnel → localhost receiver → matching Codex chat`
