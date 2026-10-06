@@ -11,7 +11,7 @@ test('Windows setup creates isolated private settings and preserves existing hoo
   const source = dirname(fileURLToPath(import.meta.url));
   const home = join(root, 'codex-home');
   function run(script, args=[]) {
-    return spawnSync('powershell.exe', ['-NoProfile','-NonInteractive','-File',join(root,script),...args], {encoding:'utf8',windowsHide:true,timeout:10000,env:{...process.env,CODEX_HOME:home}});
+    return spawnSync('powershell.exe', ['-NoProfile','-NonInteractive','-File',join(root,script),...args], {encoding:'utf8',windowsHide:true,env:{...process.env,CODEX_HOME:home}});
   }
   try {
     for (const script of ['configure.ps1','install-codex-hook.ps1']) copyFileSync(join(source,script),join(root,script));
