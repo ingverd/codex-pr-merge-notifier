@@ -14,7 +14,7 @@ test('Windows setup creates isolated private settings and preserves existing hoo
     return spawnSync('powershell.exe', ['-NoProfile','-NonInteractive','-File',join(root,script),...args], {encoding:'utf8',windowsHide:true,env:{...process.env,CODEX_HOME:home}});
   }
   try {
-    for (const script of ['configure.ps1','install-codex-hook.ps1']) copyFileSync(join(source,script),join(root,script));
+    for (const script of ['configure.ps1','install-codex-hook.ps1','start-notifier.ps1']) copyFileSync(join(source,script),join(root,script));
     const args=['-Repository','another-owner/another_repo','-NgrokDomain','fixture.example.org','-Port','9042'];
     const configured=run('configure.ps1',args);
     assert.equal(configured.status,0,configured.stderr);
@@ -34,7 +34,10 @@ test('Windows setup creates isolated private settings and preserves existing hoo
     const hooks=JSON.parse(readFileSync(join(home,'hooks.json'),'utf8'));
     assert.deepEqual(hooks.hooks.Stop,preserved.hooks.Stop);
     assert.equal(hooks.hooks.SessionStart.length,1);
-    assert.ok(hooks.hooks.SessionStart[0].hooks[0].command.includes(join(root,'start-notifier.ps1')));
+    const command=hooks.hooks.SessionStart[0].hooks[0].command;
+    const target=command.match(/ -File "([^"]+)" -Hook$/)?.[1];
+    assert.ok(target, 'The hook must contain one quoted script path');
+    assert.equal(realpathSync(target).toLowerCase(),realpathSync(join(root,'start-notifier.ps1')).toLowerCase());
     const skill=readFileSync(join(home,'skills','merge-notifier','SKILL.md'),'utf8');
     assert.ok(skill.includes('$merge-notifier reconnect'));
     const originalHooks=readFileSync(join(home,'hooks.json'),'utf8');
