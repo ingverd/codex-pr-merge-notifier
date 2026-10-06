@@ -1,13 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, copyFileSync, writeFileSync, readFileSync, statSync, realpathSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, copyFileSync, writeFileSync, readFileSync, statSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 
 test('Windows setup creates isolated private settings and preserves existing hooks and credentials', () => {
-  const root = realpathSync(mkdtempSync(join(tmpdir(), 'merge setup with spaces-')));
+  const root = mkdtempSync(join(tmpdir(), 'merge setup with spaces-'));
   const source = dirname(fileURLToPath(import.meta.url));
   const home = join(root, 'codex-home');
   function run(script, args=[]) {
@@ -37,7 +37,10 @@ test('Windows setup creates isolated private settings and preserves existing hoo
     const command=hooks.hooks.SessionStart[0].hooks[0].command;
     const target=command.match(/ -File "([^"]+)" -Hook$/)?.[1];
     assert.ok(target, 'The hook must contain one quoted script path');
-    assert.equal(realpathSync(target).toLowerCase(),realpathSync(join(root,'start-notifier.ps1')).toLowerCase());
+    const actualFile=statSync(target,{bigint:true});
+    const expectedFile=statSync(join(root,'start-notifier.ps1'),{bigint:true});
+    assert.equal(actualFile.dev,expectedFile.dev);
+    assert.equal(actualFile.ino,expectedFile.ino);
     const skill=readFileSync(join(home,'skills','merge-notifier','SKILL.md'),'utf8');
     assert.ok(skill.includes('$merge-notifier reconnect'));
     const originalHooks=readFileSync(join(home,'hooks.json'),'utf8');
