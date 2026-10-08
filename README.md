@@ -83,6 +83,8 @@ Read-only diagnostics:
 
 Direct `serve` additionally requires `MERGE_NOTIFIER_REPOSITORY`, and optionally `MERGE_NOTIFIER_PORT`. `start-notifier.ps1` reads those settings from ignored `notifier.json`. `MERGE_NOTIFIER_CODEX_STATE_DB` can override the native database path for diagnosis; `CODEX_HOME` otherwise locates `state_5.sqlite`.
 
+The receiver writes startup messages, event status codes and sanitized errors to `receiver.stdout.log` and `receiver.stderr.log` in the installation folder, including direct `serve` runs. The Windows starter launches a separate hidden process without redirecting the hook's channels, so the running receiver does not delay hook completion.
+
 ## Verification and privacy
 
 ```powershell

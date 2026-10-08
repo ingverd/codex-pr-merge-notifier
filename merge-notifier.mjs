@@ -1,8 +1,10 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import { createServer } from 'node:http';
 import { readFile } from 'node:fs/promises';
+import { createWriteStream } from 'node:fs';
+import { Console } from 'node:console';
 import { pathToFileURL } from 'node:url';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
 import { DatabaseSync } from 'node:sqlite';
 import { openDesktopClient } from './desktop-client.mjs';
@@ -145,6 +147,11 @@ async function main() {
     console.log(JSON.stringify({ recipients: readNativeRecipients(value) }, null, 2));
     return;
   }
+  const logRoot = dirname(process.argv[1]);
+  globalThis.console = new Console({
+    stdout: createWriteStream(join(logRoot, 'receiver.stdout.log'), { flags: 'w' }),
+    stderr: createWriteStream(join(logRoot, 'receiver.stderr.log'), { flags: 'w' })
+  });
   const secret = (await readFile(value, 'utf8')).trim();
   if (secret.length < 32) throw new Error('Use an opaque random webhook secret of at least 32 characters');
   const { repository, port } = receiverSettings();
@@ -170,5 +177,5 @@ async function main() {
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  main().catch(error => { console.error(error.message); process.exit(1); });
+  main().catch(error => { console.error(error.message); process.exitCode = 1; });
 }
