@@ -1,10 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, copyFileSync, writeFileSync, mkdirSync, rmSync } from 'node:fs';
+import { mkdtempSync, copyFileSync, writeFileSync, mkdirSync, rmSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
+import { createServer } from 'node:net';
 
 const source = dirname(fileURLToPath(import.meta.url));
 function run(caseName) {
@@ -74,4 +75,87 @@ test('explicit reconnect replaces the owned receiver once even in the current ap
   assert.equal(result.failure, null);
   assert.equal(result.starts, 1);
   assert.deepEqual(result.stops, [77]);
+});
+
+test('a startup hook releases captured output while its real receiver stays alive', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'codex-pr-merge-hook-test-'));
+  let hook;
+  let receiverPid;
+  let closed;
+  let timer;
+  try {
+    copyFileSync(join(source, 'start-notifier.ps1'), join(root, 'start-notifier.ps1'));
+    copyFileSync(join(source, 'merge-notifier.mjs'), join(root, 'merge-notifier.mjs'));
+    mkdirSync(join(root, 'private'));
+    writeFileSync(join(root, 'private', 'webhook.secret'), 'fixture-only-secret-value-'.repeat(3));
+    writeFileSync(join(root, 'desktop-client.mjs'), `
+export async function openDesktopClient() {
+  if (process.argv[2] === 'serve') console.error('fixture diagnostic');
+  return { close() {}, async call() { return {}; } };
+}
+`);
+    const reservation = createServer();
+    await new Promise(resolve => reservation.listen(0, '127.0.0.1', resolve));
+    const port = reservation.address().port;
+    await new Promise((resolve, reject) => reservation.close(error => error ? reject(error) : resolve()));
+    writeFileSync(join(root, 'notifier.json'), JSON.stringify({repository:'octocat/example',port}));
+    const psQuote = value => "'" + value.replaceAll("'", "''") + "'";
+    writeFileSync(join(root, 'harness.ps1'), `
+$ErrorActionPreference = 'Stop'
+$env:CODEX_APP_TOOLS_PIPE_PATH = 'fixture-pipe'
+$env:CODEX_MCP_NODE_PATH = ${psQuote(process.execPath)}
+function Get-Service { param($Name, $ErrorAction) [pscustomobject]@{Status='Running'} }
+function Get-NetTCPConnection {
+  param($LocalPort, $State, $ErrorAction)
+  $taskPidFile = Join-Path $PSScriptRoot 'receiver.pid'
+  $taskLogFile = Join-Path $PSScriptRoot 'receiver.stdout.log'
+  if ((Test-Path -LiteralPath $taskPidFile) -and (Test-Path -LiteralPath $taskLogFile) -and
+      (Get-Content -LiteralPath $taskLogFile -Raw) -match 'listening') {
+    [pscustomobject]@{LocalAddress='127.0.0.1';LocalPort=[int]$LocalPort;OwningProcess=[int](Get-Content -LiteralPath $taskPidFile)}
+  }
+}
+function Start-Process {
+  param($FilePath,$ArgumentList,$WorkingDirectory,$WindowStyle,$RedirectStandardOutput,$RedirectStandardError,[switch]$PassThru)
+  $taskProcess = Microsoft.PowerShell.Management\\Start-Process @PSBoundParameters
+  [IO.File]::WriteAllText((Join-Path $PSScriptRoot 'receiver.pid'), [string]$taskProcess.Id)
+  $taskProcess
+}
+& (Join-Path $PSScriptRoot 'start-notifier.ps1') -Hook
+`);
+    hook = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-File', join(root, 'harness.ps1')], {
+      windowsHide: true, stdio: ['pipe', 'pipe', 'pipe']
+    });
+    let stdout = '';
+    let stderr = '';
+    hook.stdout.on('data', data => { stdout += data; });
+    hook.stderr.on('data', data => { stderr += data; });
+    closed = new Promise(resolve => hook.once('close', code => resolve(code)));
+    hook.stdin.end(JSON.stringify({hook_event_name:'SessionStart',source:'startup',session_id:'11111111-1111-4111-8111-111111111111'}));
+    const result = await Promise.race([
+      closed.then(code => ({code})),
+      new Promise(resolve => { timer = setTimeout(() => resolve({timedOut:true}), 10000); })
+    ]);
+    clearTimeout(timer);
+    receiverPid = Number(readFileSync(join(root, 'receiver.pid'), 'utf8'));
+    assert.equal(result.timedOut, undefined, 'hook output remained open after its PowerShell launcher exited');
+    assert.equal(result.code, 0, stderr);
+    assert.equal(stdout.trim(), '', 'a successful startup hook must stay quiet\n' +
+      readFileSync(join(root, 'receiver.stdout.log'), 'utf8') + '\n' +
+      readFileSync(join(root, 'receiver.stderr.log'), 'utf8'));
+    assert.doesNotThrow(() => process.kill(receiverPid, 0), 'receiver must outlive its startup hook');
+    assert.match(readFileSync(join(root, 'receiver.stdout.log'), 'utf8'), /listening/);
+    assert.match(readFileSync(join(root, 'receiver.stderr.log'), 'utf8'), /fixture diagnostic/);
+    const response = await fetch(`http://127.0.0.1:${port}/github/merge`, {method:'POST',body:'{}',signal:AbortSignal.timeout(5000)});
+    assert.equal(response.status, 401, 'receiver remains available and rejects an unsigned event');
+  } finally {
+    clearTimeout(timer);
+    if (!receiverPid) {
+      try { receiverPid = Number(readFileSync(join(root, 'receiver.pid'), 'utf8')); } catch {}
+    }
+    if (receiverPid) { try { process.kill(receiverPid); } catch {} }
+    if (hook?.exitCode === null) hook.kill();
+    if (closed) await closed;
+    assert.equal(dirname(root), tmpdir(), 'cleanup stays inside the test temporary directory');
+    rmSync(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 50 });
+  }
 });

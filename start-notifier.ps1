@@ -63,9 +63,10 @@ try {
     }
     Stop-Process -Id $taskOld.ProcessId -ErrorAction Stop
   }
+  # Keep Windows shell launch detached; the receiver writes its own logs.
   $taskReceiver = Start-Process -FilePath $env:CODEX_MCP_NODE_PATH -ArgumentList @(
     ('"' + $taskScript + '"'), 'serve', ('"' + $taskSecret + '"'), $taskConnection
-  ) -WorkingDirectory $taskRoot -WindowStyle Hidden -RedirectStandardOutput (Join-Path $taskRoot 'receiver.stdout.log') -RedirectStandardError (Join-Path $taskRoot 'receiver.stderr.log') -PassThru
+  ) -WorkingDirectory $taskRoot -WindowStyle Hidden -PassThru
   $taskDeadline = [DateTime]::UtcNow.AddSeconds(8)
   do {
     $taskReady = Get-NetTCPConnection -LocalPort $taskPort -State Listen -ErrorAction SilentlyContinue |
