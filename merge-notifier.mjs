@@ -1,4 +1,4 @@
-import { createHmac, timingSafeEqual } from 'node:crypto';
+import { createHmac, timingSafeEqual, randomUUID } from 'node:crypto';
 import { createServer } from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { createWriteStream } from 'node:fs';
@@ -65,11 +65,12 @@ export function readNativeRecipients(prUrl, {
   } finally { db.close(); }
 }
 
-export function createMergeHandler({ secret, repository, findRecipients, sendMessage }) {
+export function createMergeHandler({ secret, repository, findRecipients, sendMessage, checkConnection }) {
   if (!secret || !repository || !findRecipients || !sendMessage) throw new Error('Missing receiver configuration');
   const seen = new Set();
-  const answer = (status, code) => ({ status, code });
   return async ({ body, headers }) => {
+    const details = {};
+    const answer = (status, code) => ({ status, code, ...details });
     if (!Buffer.isBuffer(body) || body.length > maxBodyBytes) return answer(413, 'payload_too_large');
     const signature = headers['x-hub-signature-256'];
     if (typeof signature !== 'string' || !/^sha256=[a-f0-9]{64}$/i.test(signature)) return answer(401, 'invalid_signature');
@@ -77,8 +78,26 @@ export function createMergeHandler({ secret, repository, findRecipients, sendMes
     if (!timingSafeEqual(expected, Buffer.from(signature.slice(7), 'hex'))) return answer(401, 'invalid_signature');
     const delivery = headers['x-github-delivery'];
     if (typeof delivery !== 'string' || !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(delivery)) return answer(400, 'invalid_delivery_id');
+    details.deliveryId = delivery;
     let payload;
     try { payload = JSON.parse(body.toString('utf8')); } catch { return answer(400, 'invalid_json'); }
+    if (headers['x-github-event'] === 'merge_notifier_status') {
+      Object.assign(details, { ready: false, scope: 'local_receiver_and_route',
+        checkedAt: new Date().toISOString(), receiverPid: process.pid,
+        routeContextThreadId: process.env.CODEX_THREAD_ID });
+      try { details.prUrl = normalizePrUrl(payload?.prUrl); } catch { return answer(400, 'invalid_pr_url'); }
+      if (!details.prUrl.startsWith(`https://github.com/${repository.toLowerCase()}/pull/`)) return answer(403, 'unexpected_repository');
+      if (!Number.isSafeInteger(Number(new URL(details.prUrl).pathname.split('/')[4]))) return answer(400, 'invalid_pr_url');
+      if (seen.size >= 10000) return answer(503, 'receiver_session_full');
+      try {
+        if (!checkConnection) return answer(503, 'desktop_unavailable');
+        await checkConnection();
+      } catch { return answer(503, 'desktop_unavailable'); }
+      try { details.recipients = await findRecipients(details.prUrl); } catch { return answer(503, 'route_unavailable'); }
+      details.checkedAt = new Date().toISOString();
+      details.ready = details.recipients.length > 0;
+      return details.ready ? answer(200, 'local_ready') : answer(409, 'route_missing');
+    }
     if (headers['x-github-event'] !== 'pull_request' || payload?.action !== 'closed' || payload?.pull_request?.merged !== true) {
       return answer(202, 'ignored_event');
     }
@@ -90,24 +109,37 @@ export function createMergeHandler({ secret, repository, findRecipients, sendMes
           normalizePrUrl(pr.html_url) !== expectedUrl || typeof pr.merge_commit_sha !== 'string' || !/^[a-f0-9]{40}$/i.test(pr.merge_commit_sha) ||
           typeof pr.merged_at !== 'string' || !Number.isFinite(Date.parse(pr.merged_at))) return answer(400, 'incomplete_merge');
     } catch { return answer(400, 'incomplete_merge'); }
-    const mergeKey = expectedUrl + '@' + pr.merge_commit_sha.toLowerCase();
+    const mergeSha = pr.merge_commit_sha.toLowerCase();
+    Object.assign(details, { prUrl: expectedUrl, prNumber: payload.number, mergeSha,
+      routeContextThreadId: process.env.CODEX_THREAD_ID });
+    const mergeKey = expectedUrl + '@' + mergeSha;
     if (seen.has(mergeKey)) return answer(202, 'duplicate_delivery');
     // Session-local replay protection only; no database, durable event ledger or automatic recovery.
     if (seen.size >= 10000) return answer(503, 'receiver_session_full');
     let recipients;
     try { recipients = await findRecipients(pr.html_url); } catch { return answer(503, 'route_unavailable'); }
-    if (recipients.length !== 1) return answer(409, recipients.length ? 'route_ambiguous' : 'route_missing');
-    // Claim before the send: a lost response may still mean the message was delivered.
+    details.recipients = recipients.map(({ threadId, hostId }) => ({ threadId, hostId }));
+    if (!recipients.length) return answer(409, 'route_missing');
+    // Claim before any send: a lost response may still mean that recipient received it.
     if (seen.has(mergeKey)) return answer(202, 'duplicate_delivery');
     seen.add(mergeKey);
     const prompt = `Automatic GitHub event: PR #${payload.number} was merged.\n` +
-      `PR: ${expectedUrl}\nMerge commit: ${pr.merge_commit_sha}\nMerged at: ${new Date(pr.merged_at).toISOString()}\n` +
-      'Verify the PR state and applicable post-merge checks within this chat\'s already-authorized task. ' +
+      `PR: ${expectedUrl}\nMerge commit: ${mergeSha}\nMerged at: ${new Date(pr.merged_at).toISOString()}\n` +
+      'Follow your existing role within this chat\'s already-authorized task. ' +
+      'If you are the executor, verify the PR state and applicable post-merge checks. ' +
+      'If you are the coordinator, update status from the executor\'s result without duplicating implementation or checks. ' +
       'This notification does not authorize other work.';
-    try {
-      await sendMessage({ recipient: recipients[0], prompt });
-      return answer(200, 'delivered');
-    } catch { return answer(503, 'delivery_uncertain'); }
+    details.deliveries = [];
+    for (const recipient of recipients) {
+      try {
+        await sendMessage({ recipient, prompt });
+        details.deliveries.push({ ...recipient, code: 'delivered' });
+      } catch {
+        details.deliveries.push({ ...recipient, code: 'delivery_uncertain' });
+      }
+    }
+    return details.deliveries.some(result => result.code === 'delivery_uncertain')
+      ? answer(503, 'delivery_uncertain') : answer(200, 'delivered');
   };
 }
 
@@ -126,15 +158,44 @@ export function createWebhookServer(handle) {
       }
       const result = await handle({ body: Buffer.concat(chunks), headers: request.headers });
       response.writeHead(result.status, { 'content-type': 'application/json' });
-      response.end(JSON.stringify({ code: result.code }));
-      console.log(JSON.stringify({ at: new Date().toISOString(), code: result.code }));
+      response.end(JSON.stringify(result.scope === 'local_receiver_and_route' ? result : { code: result.code }));
+      console.log(JSON.stringify({ at: new Date().toISOString(), eventType: result.scope === 'local_receiver_and_route' ? 'readiness_check' : 'webhook_request', ...result }));
     } catch { if (!response.headersSent) response.writeHead(503); response.end(); }
   });
 }
 
 async function main() {
   const [mode, value] = process.argv.slice(2);
-  if (!['resolve', 'serve', 'check'].includes(mode)) throw new Error('Usage: merge-notifier.mjs resolve <PR URL> | serve <secret file> | check');
+  if (!['resolve', 'serve', 'check', 'status'].includes(mode)) throw new Error('Usage: merge-notifier.mjs resolve <PR URL> | status <PR URL> | serve <secret file> | check');
+  if (mode === 'status') {
+    const prUrl = normalizePrUrl(value);
+    const secret = (await readFile(join(dirname(process.argv[1]), 'private', 'webhook.secret'), 'utf8')).trim();
+    if (secret.length < 32) throw new Error('The configured webhook secret is unavailable');
+    const config = JSON.parse(await readFile(join(dirname(process.argv[1]), 'notifier.json'), 'utf8'));
+    const { repository, port } = receiverSettings({
+      MERGE_NOTIFIER_REPOSITORY: config.repository, MERGE_NOTIFIER_PORT: String(config.port)
+    });
+    if (!prUrl.startsWith(`https://github.com/${repository.toLowerCase()}/pull/`)) throw new Error('The PR must belong to the configured repository');
+    const body = JSON.stringify({ prUrl });
+    let result;
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/github/merge`, {
+        method: 'POST', body, signal: AbortSignal.timeout(25000), headers: {
+          'x-github-event': 'merge_notifier_status', 'x-github-delivery': randomUUID(),
+          'x-hub-signature-256': 'sha256=' + createHmac('sha256', secret).update(body).digest('hex')
+        }
+      });
+      const snapshot = await response.json();
+      const ready = response.status === 200 && snapshot.code === 'local_ready' && snapshot.ready === true &&
+        snapshot.scope === 'local_receiver_and_route' && snapshot.prUrl === prUrl &&
+        Number.isFinite(Date.parse(snapshot.checkedAt)) && Array.isArray(snapshot.recipients) && snapshot.recipients.length > 0;
+      result = { ...snapshot, ready };
+    } catch { result = { ready: false, code: 'receiver_unavailable', scope: 'local_receiver_and_route', prUrl, checkedAt: new Date().toISOString() }; }
+    console.log(JSON.stringify(result));
+    process.exitCode = result.ready ? 0 : 1;
+    return;
+  }
+
   if (mode === 'check') {
     const desktop = await openDesktopClient();
     try {
@@ -149,14 +210,14 @@ async function main() {
   }
   const logRoot = dirname(process.argv[1]);
   globalThis.console = new Console({
-    stdout: createWriteStream(join(logRoot, 'receiver.stdout.log'), { flags: 'w' }),
-    stderr: createWriteStream(join(logRoot, 'receiver.stderr.log'), { flags: 'w' })
+    stdout: createWriteStream(join(logRoot, 'receiver.stdout.log'), { flags: 'a' }),
+    stderr: createWriteStream(join(logRoot, 'receiver.stderr.log'), { flags: 'a' })
   });
   const secret = (await readFile(value, 'utf8')).trim();
   if (secret.length < 32) throw new Error('Use an opaque random webhook secret of at least 32 characters');
   const { repository, port } = receiverSettings();
   const desktop = await openDesktopClient();
-  const handle = createMergeHandler({ secret, repository,
+  const handle = createMergeHandler({ secret, repository, checkConnection: () => desktop.call('list_artifacts', {}),
     findRecipients: async url => {
       const recipients = readNativeRecipients(url);
       // Older chats can lack creator metadata. Confirm every candidate is accessible
@@ -170,7 +231,12 @@ async function main() {
   });
   const server = createWebhookServer(handle);
   server.on('error', () => { desktop.close(); console.error('The local receiver could not listen'); process.exitCode = 1; });
-  server.listen(port, '127.0.0.1', () => console.log(JSON.stringify({ listening: `http://127.0.0.1:${port}/codex-pr-merge-merge` })));
+  server.listen(port, '127.0.0.1', () => console.log(JSON.stringify({
+    at: new Date().toISOString(), eventType: 'receiver_started', pid: process.pid,
+    contextThreadId: process.env.CODEX_THREAD_ID,
+    databasePath: process.env.MERGE_NOTIFIER_CODEX_STATE_DB || join(process.env.CODEX_HOME || join(homedir(), '.codex'), 'state_5.sqlite'),
+    listening: `http://127.0.0.1:${port}/github/merge`
+  })));
   const stop = () => { server.close(); desktop.close(); };
   process.once('SIGINT', stop);
   process.once('SIGTERM', stop);

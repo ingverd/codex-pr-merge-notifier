@@ -28,9 +28,9 @@ function request(payload = merge(), delivery = '11111111-1111-4111-8111-11111111
     'x-hub-signature-256': 'sha256=' + createHmac('sha256', secret).update(body).digest('hex')
   } };
 }
-function harness({ route = async () => [recipient], send } = {}) {
+function harness({ route = async () => [recipient], send, check = async () => {} } = {}) {
   const messages = [];
-  const handle = createMergeHandler({ secret, repository: 'octocat/example', findRecipients: route,
+  const handle = createMergeHandler({ secret, repository: 'octocat/example', findRecipients: route, checkConnection: check,
     sendMessage: send ?? (async message => { messages.push(message); }) });
   return { handle, messages };
 }
@@ -79,15 +79,49 @@ test('a signed event for another repository cannot wake a chat', async () => {
   assert.equal(messages.length, 0);
 });
 
-for (const [name, candidates] of [['missing', []], ['ambiguous', [recipient, { threadId: 'other', hostId: 'local' }]]]) {
-  test(`${name} attachment routing sends no message`, async () => {
-    const { handle, messages } = harness({ route: async () => candidates });
-    const result = await handle(request());
-    assert.equal(result.status, 409);
-    assert.equal(result.code, `route_${name}`);
-    assert.equal(messages.length, 0);
-  });
-}
+test('missing attachment routing sends no message and records the exact merge', async () => {
+  const { handle, messages } = harness({ route: async () => [] });
+  const result = await handle(request());
+  assert.equal(result.status, 409);
+  assert.equal(result.code, 'route_missing');
+  assert.equal(result.deliveryId, '11111111-1111-4111-8111-111111111111');
+  assert.equal(result.prUrl, prUrl.toLowerCase());
+  assert.equal(result.prNumber, 164);
+  assert.equal(result.mergeSha, sha);
+  assert.deepEqual(result.recipients, []);
+  assert.equal(messages.length, 0);
+});
+
+test('a merge notifies both attached chats once and gives each its existing role', async () => {
+  const coordinator = { threadId: 'coordinator-thread', hostId: 'local' };
+  const { handle, messages } = harness({ route: async () => [recipient, coordinator] });
+  const result = await handle(request());
+  assert.equal(result.status, 200);
+  assert.deepEqual(messages.map(message => message.recipient), [recipient, coordinator]);
+  assert.deepEqual(result.recipients, [recipient, coordinator]);
+  assert.deepEqual(result.deliveries, [recipient, coordinator].map(chat => ({ ...chat, code: 'delivered' })));
+  assert.match(messages[0].prompt, /executor/);
+  assert.match(messages[1].prompt, /coordinator/);
+  assert.equal((await handle(request())).code, 'duplicate_delivery');
+  assert.equal(messages.length, 2);
+});
+
+test('an uncertain first recipient does not suppress the second or cause a retry', async () => {
+  const coordinator = { threadId: 'coordinator-thread', hostId: 'local' };
+  const attempts = [];
+  const { handle } = harness({ route: async () => [recipient, coordinator], send: async message => {
+    attempts.push(message.recipient);
+    if (message.recipient.threadId === recipient.threadId) throw new Error('Response lost');
+  } });
+  const result = await handle(request());
+  assert.equal(result.status, 503);
+  assert.equal(result.code, 'delivery_uncertain');
+  assert.deepEqual(result.deliveries, [
+    { ...recipient, code: 'delivery_uncertain' }, { ...coordinator, code: 'delivered' }
+  ]);
+  assert.equal((await handle(request())).code, 'duplicate_delivery');
+  assert.deepEqual(attempts, [recipient, coordinator]);
+});
 
 test('a redelivered event cannot send twice during the receiver session', async () => {
   const { handle, messages } = harness();
@@ -186,4 +220,63 @@ test('native database routing finds older attachments and excludes archived or o
     assert.deepEqual(readNativeRecipients(prUrl, { databasePath: path, contextThreadId: 'caller' }), [{ threadId: 'target', hostId: 'local' }]);
     assert.throws(() => readNativeRecipients(prUrl, { databasePath: path, contextThreadId: 'missing-caller' }));
   } finally { unlinkSync(path); rmdirSync(directory); }
+});
+
+function readinessRequest(url = prUrl) {
+  const signed = request({ prUrl: url });
+  signed.headers['x-github-event'] = 'merge_notifier_status';
+  return signed;
+}
+
+test('readiness uses the running receiver without sending or claiming a merge', async () => {
+  let checks = 0;
+  const { handle, messages } = harness({ check: async () => { checks++; } });
+  const result = await handle(readinessRequest());
+  assert.equal(result.status, 200);
+  assert.equal(result.code, 'local_ready');
+  assert.equal(result.ready, true);
+  assert.equal(result.scope, 'local_receiver_and_route');
+  assert.equal(result.prUrl, prUrl.toLowerCase());
+  assert.ok(Number.isFinite(Date.parse(result.checkedAt)));
+  assert.equal(result.receiverPid, process.pid);
+  assert.deepEqual(result.recipients, [recipient]);
+  assert.equal(checks, 1);
+  assert.equal(messages.length, 0);
+  assert.equal((await handle(request())).code, 'delivered');
+  assert.equal(messages.length, 1, 'status must not consume the merge replay key');
+});
+
+test('readiness fails closed on unavailable desktop, routing and invalid targets', async () => {
+  for (const [options, status, code] of [
+    [{ route: async () => [] }, 409, 'route_missing'],
+    [{ check: async () => { throw new Error('Disconnected'); } }, 503, 'desktop_unavailable'],
+    [{ route: async () => { throw new Error('Database unavailable'); } }, 503, 'route_unavailable']
+  ]) {
+    const { handle, messages } = harness(options);
+    const result = await handle(readinessRequest());
+    assert.equal(result.status, status);
+    assert.equal(result.code, code);
+    assert.equal(result.ready, false);
+    assert.equal(messages.length, 0);
+  }
+  const { handle, messages } = harness({ check: async () => { throw new Error('Invalid target reached desktop'); } });
+  assert.equal((await handle(readinessRequest('not-a-url'))).status, 400);
+  assert.equal((await handle(readinessRequest('https://github.com/other/repository/pull/664'))).status, 403);
+  const unsigned = readinessRequest();
+  delete unsigned.headers['x-hub-signature-256'];
+  assert.equal((await handle(unsigned)).status, 401);
+  assert.equal(messages.length, 0);
+});
+test('readiness is unavailable when the receiver session cannot accept a new merge', async () => {
+  const { handle } = harness({ send: async () => {} });
+  for (let index = 0; index < 10000; index++) {
+    const payload = merge();
+    payload.pull_request.merge_commit_sha = index.toString(16).padStart(40, '0');
+    assert.equal((await handle(request(payload))).code, 'delivered');
+  }
+  const snapshot = await handle(readinessRequest());
+  assert.equal(snapshot.status, 503);
+  assert.equal(snapshot.code, 'receiver_session_full');
+  assert.equal(snapshot.ready, false);
+  assert.equal((await handle(request())).code, 'receiver_session_full');
 });

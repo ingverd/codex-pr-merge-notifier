@@ -159,3 +159,166 @@ function Start-Process {
     rmSync(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 50 });
   }
 });
+
+test('real receiver routes a signed merge to both eligible native attachments, logs it and rejects replay', async () => {
+  const { DatabaseSync } = await import('node:sqlite');
+  const { createHmac } = await import('node:crypto');
+  const { spawn } = await import('node:child_process');
+  const { readFileSync } = await import('node:fs');
+  const root = mkdtempSync(join(tmpdir(), 'codex-pr-merge-chain-test-'));
+  let receiver;
+  let closed;
+  try {
+    for (const file of ['merge-notifier.mjs', 'desktop-client.mjs']) copyFileSync(join(source, file), join(root, file));
+    const secret = 'isolated-fixture-secret-never-used-by-real-bridge';
+    mkdirSync(join(root, 'private'));
+    const secretPath = join(root, 'private', 'webhook.secret');
+    writeFileSync(secretPath, secret);
+    const stdoutPath = join(root, 'receiver.stdout.log');
+    const stderrPath = join(root, 'receiver.stderr.log');
+    writeFileSync(stdoutPath, 'previous stdout marker\n');
+    writeFileSync(stderrPath, 'previous stderr marker\n');
+    const caller = 'fixture-caller';
+    const recipients = ['fixture-executor', 'fixture-coordinator'];
+    const dbPath = join(root, 'state.sqlite');
+    const db = new DatabaseSync(dbPath);
+    db.exec('CREATE TABLE threads(id TEXT PRIMARY KEY, creator_account_id TEXT, creator_user_id TEXT, archived INTEGER); CREATE TABLE thread_attachments(thread_id TEXT, attachment_type TEXT, identity_key TEXT, payload TEXT)');
+    const putThread = db.prepare('INSERT INTO threads VALUES(?,?,?,?)');
+    for (const id of [caller, ...recipients]) putThread.run(id, 'fixture-account', 'fixture-user', 0);
+    putThread.run('fixture-foreign', 'another-account', 'another-user', 0);
+    putThread.run('fixture-archived', 'fixture-account', 'fixture-user', 1);
+    const prUrl = 'https://github.com/octocat/example/pull/164';
+    const identity = JSON.stringify(['github.com', 'octocat', 'example', 164]);
+    const putAttachment = db.prepare('INSERT INTO thread_attachments VALUES(?,?,?,?)');
+    for (const id of [...recipients, 'fixture-foreign', 'fixture-archived']) {
+      putAttachment.run(id, 'pull_request', identity, JSON.stringify({url:'https://github.com/Octocat/Example/pull/164'}));
+    }
+    db.close();
+    const resources = join(root, 'resources');
+    const pluginRoot = join(resources, 'plugins', 'openai-bundled', 'plugins', 'codex-app-tools');
+    mkdirSync(pluginRoot, {recursive:true});
+    const callsPath = join(root, 'fake-native-calls.jsonl');
+    writeFileSync(callsPath, '');
+    writeFileSync(join(pluginRoot, 'server.mjs'), `
+import { createInterface } from 'node:readline';
+import { appendFileSync } from 'node:fs';
+const input = createInterface({input:process.stdin});
+input.on('line', line => {
+  const request = JSON.parse(line);
+  if (!request.id) return;
+  let result = {};
+  if (request.method === 'initialize') result = {protocolVersion:'2024-11-05',capabilities:{},serverInfo:{name:'fixture',version:'1'}};
+  if (request.method === 'tools/list') result = {tools:[]};
+  if (request.method === 'tools/call') {
+    const {name,arguments:args,_meta} = request.params;
+    appendFileSync(process.env.FIXTURE_NATIVE_CALLS, JSON.stringify({name,args,context:_meta['openai/threadId']})+'\\n');
+    if (_meta['openai/threadId'] !== 'fixture-caller') throw new Error('wrong caller');
+    if (name !== 'list_artifacts' && !['fixture-executor','fixture-coordinator'].includes(args.threadId)) throw new Error('excluded chat reached native transport');
+    result = {content:[{type:'text',text:JSON.stringify({ok:true})}]};
+  }
+  process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:request.id,result})+'\\n');
+});
+`);
+    const reservation = (await import('node:net')).createServer();
+    await new Promise(resolve => reservation.listen(0, '127.0.0.1', resolve));
+    const port = reservation.address().port;
+    await new Promise(resolve => reservation.close(resolve));
+    writeFileSync(join(root,'notifier.json'),JSON.stringify({repository:'octocat/example',port}));
+    receiver = spawn(process.execPath, [join(root, 'merge-notifier.mjs'), 'serve', secretPath], {
+      windowsHide:true, stdio:['ignore','pipe','pipe'],
+      env:{...process.env,CODEX_THREAD_ID:caller,CODEX_MCP_NODE_PATH:process.execPath,
+        CODEX_ELECTRON_RESOURCES_PATH:resources,CODEX_APP_TOOLS_PIPE_PATH:'fixture-only-pipe',
+        MERGE_NOTIFIER_CODEX_STATE_DB:dbPath,MERGE_NOTIFIER_PORT:String(port),
+        MERGE_NOTIFIER_REPOSITORY:'Octocat/Example',FIXTURE_NATIVE_CALLS:callsPath}
+    });
+    let diagnostics = '';
+    receiver.stderr.on('data', data => { diagnostics += data; });
+    receiver.stdout.resume();
+    closed = new Promise(resolve => receiver.once('close', resolve));
+    const endpoint = `http://127.0.0.1:${port}/github/merge`;
+    let ready = false;
+    for (let attempt=0; attempt<100; attempt++) {
+      if (receiver.exitCode !== null) assert.fail('receiver exited: '+diagnostics);
+      try { await fetch(endpoint); ready=true; break; } catch {}
+      await new Promise(resolve => setTimeout(resolve, 30));
+    }
+    assert.ok(ready, 'isolated receiver starts');
+    const readCalls = () => readFileSync(callsPath,'utf8').trim().split('\n').filter(Boolean).map(JSON.parse);
+    const checkerEnv = {...process.env,CODEX_THREAD_ID:'different-checker',MERGE_NOTIFIER_PORT:String(port)};
+    delete checkerEnv.CODEX_APP_TOOLS_PIPE_PATH;
+    delete checkerEnv.CODEX_ELECTRON_RESOURCES_PATH;
+    delete checkerEnv.CODEX_TECTONIC_PATH;
+    const statusCli = spawn(process.execPath,[join(root,'merge-notifier.mjs'),'status',prUrl],{
+      windowsHide:true,env:checkerEnv,stdio:['ignore','pipe','pipe']
+    });
+    let statusOutput='', statusError='';
+    statusCli.stdout.on('data',data=>{statusOutput+=data;});
+    statusCli.stderr.on('data',data=>{statusError+=data;});
+    const statusExit = await new Promise(resolve=>statusCli.once('close',resolve));
+    assert.equal(statusExit,0,statusError);
+    const status = JSON.parse(statusOutput);
+    assert.equal(status.code,'local_ready');
+    assert.equal(status.ready,true);
+    assert.equal(status.scope,'local_receiver_and_route');
+    assert.equal(status.prUrl,prUrl);
+    assert.equal(status.routeContextThreadId,caller,'diagnostic must use the running receiver context');
+    assert.equal(status.receiverPid,receiver.pid);
+    assert.ok(Number.isFinite(Date.parse(status.checkedAt)));
+    assert.deepEqual(status.recipients.map(item=>item.threadId).sort(),recipients.slice().sort());
+    const diagnosticCalls = readCalls();
+    assert.ok(diagnosticCalls.some(call=>call.name==='list_artifacts'),'readiness checks the existing desktop transport');
+    assert.deepEqual(diagnosticCalls.filter(call=>call.name==='read_thread').map(call=>call.args.threadId).sort(),recipients.slice().sort());
+    assert.ok(diagnosticCalls.every(call=>call.context===caller));
+    assert.equal(diagnosticCalls.filter(call=>call.name==='send_message_to_thread').length,0,'status never sends messages');
+    const unsignedStatus = await fetch(endpoint,{method:'POST',headers:{'x-github-event':'merge_notifier_status'},body:JSON.stringify({prUrl})});
+    assert.equal(unsignedStatus.status,401);
+    assert.equal(readCalls().filter(call=>call.name==='send_message_to_thread').length,0);
+    const mergeSha = 'a'.repeat(40);
+    const payload = {action:'closed',number:164,repository:{full_name:'Octocat/Example'},
+      pull_request:{number:164,merged:true,html_url:'https://github.com/Octocat/Example/pull/164',
+        merge_commit_sha:mergeSha,merged_at:'2025-01-01T00:00:00Z'}};
+    const body = JSON.stringify(payload);
+    const deliveryId = '00000000-0000-4000-8000-000000000164';
+    const headers = {'x-github-event':'pull_request','x-github-delivery':deliveryId,
+      'x-hub-signature-256':'sha256='+createHmac('sha256',secret).update(body).digest('hex')};
+    const first = await fetch(endpoint,{method:'POST',headers,body});
+    assert.equal(first.status,200,JSON.stringify(await first.clone().json()));
+    assert.equal((await first.json()).code,'delivered');
+    const repeat = await fetch(endpoint,{method:'POST',headers,body});
+    assert.equal(repeat.status,202);
+    assert.equal((await repeat.json()).code,'duplicate_delivery');
+    const unsigned = await fetch(endpoint,{method:'POST',body});
+    assert.equal(unsigned.status,401);
+    const calls = readFileSync(callsPath,'utf8').trim().split('\n').map(JSON.parse);
+    const sends = calls.filter(call=>call.name==='send_message_to_thread');
+    assert.deepEqual(sends.map(call=>call.args.threadId).sort(),recipients.slice().sort());
+    assert.ok(sends.every(call=>call.args.hostId==='local' && call.context===caller));
+    assert.ok(sends.every(call=>call.args.prompt.includes(mergeSha)));
+    const log = readFileSync(stdoutPath,'utf8');
+    assert.ok(log.startsWith('previous stdout marker\n'),'receiver preserves preceding stdout logs');
+    assert.ok(readFileSync(stderrPath,'utf8').startsWith('previous stderr marker\n'),'receiver preserves preceding stderr logs');
+    const events = log.trim().split('\n').slice(1).map(JSON.parse);
+    const started = events.find(event=>event.eventType==='receiver_started');
+    assert.equal(started.contextThreadId,caller);
+    assert.equal(started.databasePath,dbPath);
+    assert.equal(started.pid,receiver.pid);
+    const delivered = events.find(event=>event.eventType==='webhook_request' && event.code==='delivered');
+    assert.equal(delivered.status,200);
+    assert.ok(Number.isFinite(Date.parse(delivered.at)));
+    assert.equal(delivered.deliveryId,deliveryId);
+    assert.equal(delivered.prUrl,prUrl);
+    assert.equal(delivered.prNumber,164);
+    assert.equal(delivered.mergeSha,mergeSha);
+    assert.equal(delivered.routeContextThreadId,caller);
+    assert.deepEqual(delivered.recipients.map(item=>item.threadId).sort(),recipients.slice().sort());
+    assert.deepEqual(delivered.deliveries.map(item=>({threadId:item.threadId,hostId:item.hostId,code:item.code})).sort((a,b)=>a.threadId.localeCompare(b.threadId)),
+      recipients.map(threadId=>({threadId,hostId:'local',code:'delivered'})).sort((a,b)=>a.threadId.localeCompare(b.threadId)));
+  } finally {
+    if (receiver?.exitCode===null) receiver.kill();
+    if (closed) await closed;
+    const {resolve,relative,isAbsolute} = await import('node:path');
+    const cleanupRelative = relative(resolve(tmpdir()),resolve(root));
+    assert.ok(cleanupRelative && !cleanupRelative.startsWith('..') && !isAbsolute(cleanupRelative),'cleanup target stays inside temporary directory');
+    rmSync(root,{recursive:true,force:true,maxRetries:20,retryDelay:50});
+  }
+});

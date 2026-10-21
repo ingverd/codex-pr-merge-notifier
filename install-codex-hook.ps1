@@ -22,12 +22,18 @@ New-Item -ItemType Directory -Path $taskSkillRoot | Out-Null
 $taskSkill=@"
 ---
 name: merge-notifier
-description: Check or reconnect the GitHub PR merge notification bridge in a local Codex desktop chat.
+description: Check or reconnect the GitHub PR merge notification bridge in a local Codex desktop chat, including readiness before handing an attached PR to its owner for merge.
 ---
 
-Use `` `$merge-notifier reconnect `` to run ``start-notifier.ps1 -Reconnect`` in ``$taskRoot`` with the current desktop environment. Use `` `$merge-notifier status `` to inspect the ngrok service and configured localhost port, then run ``merge-notifier.mjs check`` with the bundled Node runtime.
+Invoke as `` `$merge-notifier reconnect `` or `` `$merge-notifier status <PR URL> ``. Before handing an attached PR to its owner for merge, run status for that exact PR.
 
-Never display private/ngrok.yml or private/webhook.secret. Never override process ownership guards. Inspect an uncertain startup or send before retrying. Reconnect does not change PR attachments, recipients, GitHub webhook settings or credentials. Read README.md in the installation when diagnosing a failure.
+For reconnect, run ``start-notifier.ps1 -Reconnect`` in ``$taskRoot`` from the current local Codex desktop environment. Preserve process ownership and environment guards. Inspect uncertain startup before retrying. Reconnect does not change attachments, recipients, webhook settings or credentials.
+
+For status, inspect the native ngrok service and localhost listeners for the configured receiver and ngrok API, then run ``merge-notifier.mjs status <PR URL>`` with the bundled Node runtime in ``$taskRoot``. Infer the URL only from a single unambiguous native PR attachment; otherwise ask for the exact PR. The signed read-only request reads repository/port from ignored notifier.json and uses private/webhook.secret opaquely on the existing /github/merge endpoint. It checks the actual receiver's existing desktop connection, exact live route and session capacity, sends no message and fails closed on unverified readiness. Report checkedAt (UTC) and recipients.length from the local_receiver_and_route snapshot, which also identifies receiverPid and routeContextThreadId. Use check only for launcher preflight: its new client does not prove receiver readiness. Diagnose failed status, use guarded reconnect when applicable, then rerun status.
+
+Status does not prove public ingress or guarantee a delayed merge. Merge resolves recipients afresh; there are no timers, queue, persistent delivery ledger or automatic retries. Never replay a merge event. All eligible accessible local non-archived same-account chats with native PR attachments receive notifications. Recipients keep their existing roles: executors perform applicable post-merge work, coordinators get executor status without duplicating checks. No role registry is added.
+
+Per-recipient outcomes, including uncertain sends, are appended to diagnostic logs with delivery ID, canonical PR number/URL, merge SHA, receiver context and recipients. Never display credentials, tokens, signatures, webhook bodies, message contents or account IDs. Never display private/ngrok.yml or private/webhook.secret. Read README.md in the installation when diagnosing a failure.
 "@
 [IO.File]::WriteAllText((Join-Path $taskSkillRoot 'SKILL.md'),$taskSkill,[Text.UTF8Encoding]::new($false))
 Write-Output 'Hook and skill installed. Review/trust the hook in Codex when required.'

@@ -2,9 +2,9 @@
 
 [English](README.md) | [Русский](README.ru.md)
 
-Send a signed GitHub PR merge event to the local Codex chat that owns its native PR attachment. Experimental community tooling, unaffiliated with OpenAI or ngrok.
+Send a signed GitHub PR merge event to every eligible local Codex chat with its native PR attachment. Experimental community tooling, unaffiliated with OpenAI or ngrok.
 
-`GitHub webhook → HTTPS tunnel → localhost receiver → matching Codex chat`
+`GitHub webhook → HTTPS tunnel → localhost receiver → eligible Codex chats`
 
 ## Set up with a Codex agent
 
@@ -22,16 +22,16 @@ When the user shares this repository to set up merge notifications, carry the in
 2. **Check compatibility and existing state.** Confirm Windows, a local Codex desktop chat, Node.js 24+, and the current desktop connection required by `desktop-client.mjs`. Do not invent or persist app IPC paths. Inspect existing service, receiver, hook, skill and local settings before making changes. Reuse a matching installation; the setup scripts intentionally refuse overwrites and service takeover. For a conflicting installation, explain the conflict and ask which one the user wants to keep before replacing anything.
 3. **Use the supplied setup.** Clone into a stable folder outside the user's application checkout, inspect the scripts and run the source tests. Use the official signed ngrok binary and follow **Install on Windows** in order. No npm dependencies are needed. For a fresh installation, check that the configured receiver port and ngrok's local API port 4040 are available. Automate the documented steps with available tools; do not introduce another supervisor, scheduled task, routing registry or global shell-policy change.
 4. **Keep secrets local.** Run `connect-ngrok.ps1` in an interactive local PowerShell so the user can enter the authtoken in its masked prompt. Have the user enter `private/webhook.secret` directly into GitHub as described below. Never read or display either credential in agent output, chat, screenshots or logs. Use the normal UAC and Codex hook-review flows when required; do not bypass them. Give the user one concrete local action when a step requires their input, then continue after it is completed.
-5. **Verify the running installation.** Read back the ngrok service's running state, automatic startup, Local Service account and native recovery settings. Confirm the assigned HTTPS endpoint forwards to the configured receiver on `127.0.0.1`, the installed startup hook is enabled, targets this installation and has passed required Codex review, and `merge-notifier.mjs check` reports `connected: true`. Check GitHub's live webhook configuration: exact target repository, `/github/merge`, JSON, SSL verification enabled, and only `pull_request` events. Confirm a genuine GitHub ping delivery receives HTTP 202. Inspect uncertain mutations before retrying.
-6. **Verify routing when a real PR is available.** Use the native Codex PR attachment in the intended chat, then run `merge-notifier.mjs resolve <PR URL>`. Exactly that one eligible chat must be returned. Do not attach every PR to the installation chat or create/merge a PR just for testing. If no suitable PR exists, report routing as unverified. Ping proves webhook ingress and signature validation; only a real owner-approved merge can prove delivery into the destination chat.
-7. **Report the result.** Give the installation path, configured `owner/repo`, webhook URL, checks that passed, any unverified stage or concrete blocker, and the `$merge-notifier status` / `$merge-notifier reconnect` commands. Do not report a complete end-to-end test unless a real merge notification was observed. Keep the existing chat's model and reasoning settings.
+5. **Verify the running installation.** Read back the ngrok service's running state, automatic startup, Local Service account and native recovery settings. Confirm the assigned HTTPS endpoint forwards to the configured receiver on `127.0.0.1`, the installed startup hook is enabled, targets this installation and has passed required Codex review, and the receiver listens on the configured port. Check GitHub's live webhook configuration: exact target repository, `/github/merge`, JSON, SSL verification enabled, and only `pull_request` events. Confirm a genuine GitHub ping delivery receives HTTP 202. Inspect uncertain mutations before retrying.
+6. **Verify routing when a real PR is available.** Use the native Codex PR attachment in the intended chat, then run `merge-notifier.mjs status <PR URL>`. Every eligible accessible local, non-archived, same-account chat with that native attachment is a recipient. Report checkedAt and recipients.length from the receiver snapshot. Do not attach every PR to the installation chat or create/merge a PR just for testing. If no suitable PR exists, report routing as unverified. Ping proves webhook ingress and signature validation; only a real owner-approved merge can prove delivery into the destination chat.
+7. **Report the result.** Give the installation path, configured `owner/repo`, webhook URL, checks that passed, any unverified stage or concrete blocker, and the `$merge-notifier status <PR URL>` / `$merge-notifier reconnect` commands. Do not report a complete end-to-end test unless a real merge notification was observed. Keep the existing chat's model and reasoning settings.
 
 ## Scope and compatibility
 
 - One explicitly configured GitHub.com repository per installation. Reuse the same source with your own repository, domain and credentials.
 - Windows setup helpers, Node.js 24 or later, and local Codex desktop chats. Cloud/remote chat routing and other operating systems' setup are not supported.
-- Routing reads Codex's native SQLite attachment metadata without modifying it. Exactly one accessible, non-archived chat must match the PR; missing or ambiguous routes fail closed.
-- The receiver uses the installed app's internal database schema and bundled app-tools channel. These are **internal interfaces**, not a stable public integration API. Recheck after Codex updates. The original integration was exercised on Codex desktop 26.930.2377.0 and CLI 0.159.0-alpha.12.1.
+- Routing reads Codex's native SQLite attachment metadata without modifying it. Every accessible local non-archived same-account chat with the PR attached is notified after native access verification. Missing routes and unverified desktop/session capacity fail closed.
+- The receiver uses the installed app's internal database schema and bundled app-tools channel. These are **internal interfaces**, not a stable public integration API. Recheck after Codex updates.
 - HMAC SHA-256 is required for every webhook. Only a merged `pull_request` close event for the allowed repository can send a message. PR titles/bodies are never copied into prompts.
 - Replay protection lasts for one receiver process. There is no offline queue, persistent event ledger or automatic resend after an uncertain send.
 - ngrok uses its native Windows service and failure recovery. The receiver reconnects on chat startup/resume; use the chat command if it fails between those events. Windows/Codex must be running when delivery arrives.
@@ -52,7 +52,7 @@ When the user shares this repository to set up merge notifications, carry the in
 4. Open an administrator PowerShell in the installation folder and run `install-ngrok-service.ps1`. Existing ngrok services/processes are not taken over. The service runs as Windows Local Service, with automatic startup and native failure recovery. It gets read access to the ngrok credential, not the GitHub webhook secret.
 5. From a local Codex desktop chat, run `install-codex-hook.ps1`. It adds one user-level `SessionStart` hook and installs the `merge-notifier` skill. It preserves other hooks and refuses to replace an existing skill. Review/trust the hook through Codex's supported hook review if the app requires it. [Codex hook documentation](https://learn.chatgpt.com/docs/hooks).
 6. In GitHub repository **Settings → Webhooks**, configure `https://YOUR_DOMAIN/github/merge`, JSON, SSL verification enabled, and only `pull_request` events. Enter the contents of `private/webhook.secret` directly into GitHub's Secret field using your local editor; do not paste it into a chat. Start the receiver and confirm GitHub's ping delivery receives HTTP 202.
-7. Attach the PR to its intended local Codex chat. The integration sends only if exactly one eligible chat has that attachment. No extra routing registry is needed.
+7. Attach the PR to its intended local Codex chat. Every eligible accessible local non-archived same-account chat with that attachment is notified. No extra routing registry is needed.
 
 No GitHub access token is required by the running receiver. GitHub webhook administration uses your normal repository permissions. ngrok and webhook credentials are local settings, ignored by Git, and are never part of the repository.
 
@@ -62,7 +62,7 @@ In a local Codex chat:
 
 ```text
 $merge-notifier reconnect
-$merge-notifier status
+$merge-notifier status <PR URL>
 ```
 
 Manual receiver startup from that chat's shell:
@@ -78,12 +78,24 @@ Read-only diagnostics:
 
 ```powershell
 & $env:CODEX_MCP_NODE_PATH .\merge-notifier.mjs check
-& $env:CODEX_MCP_NODE_PATH .\merge-notifier.mjs resolve 'https://github.com/your-owner/your-repo/pull/123'
+& $env:CODEX_MCP_NODE_PATH .\merge-notifier.mjs status 'https://github.com/your-owner/your-repo/pull/123'
 ```
 
 Direct `serve` additionally requires `MERGE_NOTIFIER_REPOSITORY`, and optionally `MERGE_NOTIFIER_PORT`. `start-notifier.ps1` reads those settings from ignored `notifier.json`. `MERGE_NOTIFIER_CODEX_STATE_DB` can override the native database path for diagnosis; `CODEX_HOME` otherwise locates `state_5.sqlite`.
 
 The receiver writes startup messages, event status codes and sanitized errors to `receiver.stdout.log` and `receiver.stderr.log` in the installation folder, including direct `serve` runs. The Windows starter launches a separate hidden process without redirecting the hook's channels, so the running receiver does not delay hook completion.
+
+## Receiver readiness and delivery
+
+Before handing an attached PR to its owner for merge, inspect the native ngrok service and localhost listeners for the configured receiver and ngrok API, then run `merge-notifier.mjs status <PR URL>` with the bundled Node runtime. Infer the URL only from a single unambiguous native PR attachment; otherwise ask for the exact PR. Report `checkedAt` and `recipients.length`. Diagnose failed readiness before using the existing guarded reconnect, then rerun status.
+
+`status` reads repository/port settings from ignored `notifier.json` and signs a read-only request to the existing `/github/merge` endpoint using `private/webhook.secret` opaquely. It checks the actual receiver's existing desktop connection, exact native route and session capacity, opens no new desktop client and sends no message. The snapshot has scope `local_receiver_and_route`, with `ready`, `code`, `checkedAt` (UTC), `receiverPid`, `routeContextThreadId`, `prUrl` and `recipients`. It fails closed on missing routes or unverified desktop/session capacity. `check` is only launcher preflight: its new client does not prove receiver readiness. Reconnect keeps its ownership and current-environment guards.
+
+This local snapshot does not prove public ingress or guarantee delivery at a later merge. Merge resolves recipients afresh. There are no timers, queue, persistent delivery ledger or automatic retries. Never replay a merge event after an uncertain send.
+
+Recipients follow their existing roles: executors perform applicable post-merge work, while coordinators obtain status from executors without duplicating their checks. The notifier adds no role registry.
+
+Append-only diagnostic logs include delivery ID, canonical PR number/URL, merge SHA, receiver context, recipients and each recipient's result, including uncertain sends. They exclude tokens, signatures, webhook bodies, message contents and account IDs.
 
 ## Verification and privacy
 
